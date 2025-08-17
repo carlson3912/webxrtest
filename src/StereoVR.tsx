@@ -1,11 +1,31 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 
-export default function StereoVR() {
+interface StereoVRProps {
+  streamLeft: MediaStream | null;
+  streamRight: MediaStream | null;
+}
+
+export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const leftVideoRef = useRef<HTMLVideoElement>(null);
   const rightVideoRef = useRef<HTMLVideoElement>(null);
   const [started, setStarted] = useState(false);
   const [status, setStatus] = useState('');
+  
+  useEffect(() => {
+    // Whenever streamLeft updates, set it as srcObject for left video element
+    if (leftVideoRef.current && streamLeft) {
+      leftVideoRef.current.srcObject = streamLeft;
+      leftVideoRef.current.play().catch(console.warn);
+    }
+  }, [streamLeft]);
+
+  useEffect(() => {
+    if (rightVideoRef.current && streamRight) {
+      rightVideoRef.current.srcObject = streamRight;
+      rightVideoRef.current.play().catch(console.warn);
+    }
+  }, [streamRight]);
 
   const updateStatus = (msg: string) => {
     console.log(msg);
