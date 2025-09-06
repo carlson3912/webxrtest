@@ -1,6 +1,6 @@
 // VideoScreenWeb.tsx
 import { useEffect, useRef, useCallback } from 'react';
-
+const HOST_URL = "wss://c47174bc6ce1.ngrok-free.app"
 const configuration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
@@ -43,11 +43,11 @@ export default function VideoScreenWeb({
 
         if (streamsAdded.current === 0) {
           console.log('adding track to left stream');
-          setStreamLeft(newStream);
+          setStreamRight(newStream);
           streamsAdded.current++;
         } else {
           console.log('adding track to right stream');
-          setStreamRight(newStream);
+          setStreamLeft(newStream);
         }
       };
 
@@ -79,19 +79,26 @@ export default function VideoScreenWeb({
   );
 
   const setupWebSocket = useCallback(() => {
-    console.log('signalingUrl', 'ws://' + signalingUrl + ':8765');
-    ws.current = new WebSocket('ws://' + signalingUrl + ':8765');
+    ws.current = new WebSocket(HOST_URL);
 
     ws.current.onopen = () => {
       console.log('WebSocket connected');
       setIsConnected(true);
-      ws.current?.send('HELLO');
+      ws.current?.send(JSON.stringify({
+        role: "app",
+        robot_id: "box"
+      }));
     };
 
     ws.current.onmessage = async (event) => {
       const message = JSON.parse(event.data);
       console.log('message', message);
-
+      if(message.type === "robot_available"){ 
+        const message = {
+          type: "HELLO",
+        };
+        ws.current?.send(JSON.stringify(message));
+     }
       if (message.sdp?.type === 'offer') {
         console.log('Received offer');
         const offerDesc = new RTCSessionDescription(message.sdp);

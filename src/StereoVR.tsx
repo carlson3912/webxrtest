@@ -6,29 +6,54 @@ interface StereoVRProps {
 }
 
 export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const leftVideoRef = useRef<HTMLVideoElement>(null);
-  const rightVideoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef(null);
+  const leftVideoRef = useRef(null);
+  const rightVideoRef = useRef(null);
+  const lastHandSendRef = useRef<number>(0);
+  const logsRef = useRef<HTMLDivElement>(null);
   const [started, setStarted] = useState(false);
   const [status, setStatus] = useState('');
+  const [logs, setLogs] = useState<string[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+  
+  const addLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logMessage = `[${timestamp}] ${message}`;
+    
+    setLogs(prevLogs => {
+      const newLogs = [...prevLogs, logMessage];
+      // Keep only last 100 logs to prevent memory issues
+      return newLogs.slice(-100);
+    });
+    
+    // Also log to console for debugging
+    console.log(message);
+    
+    // Auto-scroll to bottom
+    setTimeout(() => {
+      if (logsRef.current) {
+        logsRef.current.scrollTop = logsRef.current.scrollHeight;
+      }
+    }, 0);
+  };
   
   useEffect(() => {
     // Whenever streamLeft updates, set it as srcObject for left video element
     if (leftVideoRef.current && streamLeft) {
       leftVideoRef.current.srcObject = streamLeft;
-      leftVideoRef.current.play().catch(console.warn);
+      leftVideoRef.current.play().catch(e => addLog(`Left video play warning: ${e.message}`));
     }
   }, [streamLeft]);
 
   useEffect(() => {
     if (rightVideoRef.current && streamRight) {
       rightVideoRef.current.srcObject = streamRight;
-      rightVideoRef.current.play().catch(console.warn);
+      rightVideoRef.current.play().catch(e => addLog(`Right video play warning: ${e.message}`));
     }
   }, [streamRight]);
 
   const updateStatus = (msg: string) => {
-    console.log(msg);
+    addLog(msg);
     setStatus(msg);
   };
 
@@ -120,7 +145,7 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
       updateStatus('Videos playing');
     } catch (err) {
       updateStatus(`Video error: ${err}`);
-      console.error('Video play failed', err);
+      addLog(`Video play failed: ${err}`);
       return;
     }
 
@@ -157,7 +182,7 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
         const error = gl.getShaderInfoLog(shader);
         updateStatus(`Shader compile error: ${error}`);
-        console.error('Shader compile error:', error);
+        addLog(`Shader compile error: ${error}`);
       }
       return shader;
     };
@@ -172,7 +197,7 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       const error = gl.getProgramInfoLog(program);
       updateStatus(`Program link error: ${error}`);
-      console.error('Program link error:', error);
+      addLog(`Program link error: ${error}`);
     }
     gl.useProgram(program);
 
@@ -205,35 +230,65 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
     const videoUniformLoc = gl.getUniformLocation(program, 'videoTexture');
 
     let session: XRSession;
+    // Check for hand tracking support
+    // try {
+    //   const handTrackingSupported = await navigator.xr.isSessionSupported('immersive-vr');
+    //   setHandTrackingSupported(handTrackingSupported);
+    //   addLog(`Hand tracking supported: ${handTrackingSupported}`);
+    // } catch (err) {
+    //   addLog(`Hand tracking check failed: ${err}`);
+    //   setHandTrackingSupported(false);
+    // }
+
     try {
       updateStatus('Requesting XR session...');
       session = await navigator.xr.requestSession('immersive-vr', {
-        optionalFeatures: ['local-floor', 'bounded-floor']
+        optionalFeatures: ['hand-tracking']
       });
       updateStatus('XR session created');
+      
+      // Log session capabilities
+      addLog(`XR session created with ${session.inputSources.length} initial input sources`);
+      addLog(`Session enabled features: ${session.enabledFeatures ? Array.from(session.enabledFeatures).join(', ') : 'none reported'}`);
+      
+      // Monitor input source changes
+      // session.addEventListener('inputsourceschange', (event) => {
+      //   addLog(`Input sources changed: +${event.added.length} -${event.removed.length}, total: ${session.inputSources.length}`);
+      //   event.added.forEach((source, i) => {
+      //     addLog(`Added input source ${i}: handedness=${source.handedness}, hasHand=${!!source.hand}`);
+      //   });
+      //   event.removed.forEach((source, i) => {
+      //     addLog(`Removed input source ${i}: handedness=${source.handedness}, hasHand=${!!source.hand}`);
+      //   });
+      // });
+      
     } catch (err) {
       updateStatus(`Failed to start XR session: ${err}`);
-      console.error('Failed to start XR session', err);
+      addLog(`Failed to start XR session: ${err}`);
       return;
     }
 
     await gl.makeXRCompatible();
     session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
-    const refSpace = await session.requestReferenceSpace('local-floor');
+    const refSpace = await session.requestReferenceSpace('viewer');
     updateStatus('Reference space created, starting render loop...');
+
+    // Setup WebSocket connection for hand tracking data
+    await setupHandTrackingWebSocket();
 
     session.addEventListener('end', () => {
       updateStatus('XR session ended');
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     });
 
     let frameCount = 0;
     const onXRFrame = (time: DOMHighResTimeStamp, frame: XRFrame) => {
       frameCount++;
       
-      if (frameCount % 60 === 0) { // Log every 60 frames
-        updateStatus(`Rendering frame ${frameCount}`);
-      }
 
       const pose = frame.getViewerPose(refSpace);
       if (!pose) {
@@ -241,12 +296,19 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
         return;
       }
 
+      // Handle hand tracking
+
+      handleHandTracking(frame, refSpace);
+      
+
       gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer!.framebuffer);
       gl.clearColor(0.1, 0.1, 0.1, 1); // Slightly gray background for debugging
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       pose.views.forEach((view, i) => {
         const viewport = session.renderState.baseLayer!.getViewport(view);
+        if (!viewport) return;
+        
         gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
         const video = i === 0 ? leftVideo : rightVideo;
@@ -255,7 +317,7 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
         // More detailed video ready check
         if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
           if (frameCount < 10) { // Only log for first few frames
-            console.warn(`Eye ${i} video not ready: readyState=${video.readyState}, dimensions=${video.videoWidth}x${video.videoHeight}`);
+            addLog(`Eye ${i} video not ready: readyState=${video.readyState}, dimensions=${video.videoWidth}x${video.videoHeight}`);
           }
           // Render a colored quad as fallback
           gl.clearColor(i === 0 ? 0.2 : 0.0, 0.0, i === 1 ? 0.2 : 0.0, 1.0);
@@ -268,7 +330,7 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
         try {
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
         } catch (err) {
-          console.error(`texImage2D failed for eye ${i}:`, err);
+          addLog(`texImage2D failed for eye ${i}: ${err}`);
           return;
         }
         
@@ -280,6 +342,159 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
     };
 
     session.requestAnimationFrame(onXRFrame);
+  };
+
+  const setupHandTrackingWebSocket = () => {
+    return new Promise((resolve, reject) => {
+      try {
+        // Connect to the same signaling server but on a different endpoint for hand tracking
+        let webSocket = new WebSocket("wss://c47174bc6ce1.ngrok-free.app"); // Different port for hand tracking
+        
+        webSocket.onopen = () => {
+          webSocket.send(JSON.stringify({
+            role: "teleop",
+            robot_id: "motion"
+          }));
+          wsRef.current = webSocket;
+          updateStatus('Hand tracking WebSocket connected');
+          addLog('Hand tracking WebSocket connected');
+          resolve(true);
+        };
+        
+        webSocket.onerror = (error) => {
+          resolve(false);
+          addLog(`Hand tracking WebSocket error: ${error}`);
+          updateStatus('Hand tracking WebSocket error');
+        };
+        
+        webSocket.onclose = () => {
+          addLog('Hand tracking WebSocket closed');
+          updateStatus('Hand tracking WebSocket closed');
+        };
+        
+      } catch (error) {
+        addLog(`Failed to setup hand tracking WebSocket: ${error}`);
+        updateStatus('Failed to setup hand tracking WebSocket');
+      }
+    });
+    
+  };
+
+  const handleHandTracking = (frame: XRFrame, referenceSpace: XRReferenceSpace) => {
+    // addLog(`Handling hand tracking for ${frame.session.inputSources.length} input sources`);
+    const now = performance.now(); // current time in ms
+    const sendInterval = 1000 / 30; // 30 Hz → ~33.33 ms per send
+  
+    if (now - lastHandSendRef.current < sendInterval) {
+      return; // skip sending this frame
+    }
+    lastHandSendRef.current = now;
+    if (!wsRef.current){
+      // addLog('Hand tracking WebSocket not set');
+    }
+    else if (wsRef.current.readyState !== WebSocket.OPEN) {
+      addLog('Hand tracking WebSocket not open');
+    }
+
+    const handData: any = {};
+
+    // Process each input source (hands)
+    // Joint order as specified in the table
+const JOINT_ORDER = [
+  "wrist",                              // 0
+  "thumb-metacarpal",                   // 1
+  "thumb-phalanx-proximal",            // 2
+  "thumb-phalanx-distal",              // 3
+  "thumb-tip",                         // 4
+  "index-finger-metacarpal",           // 5
+  "index-finger-phalanx-proximal",     // 6
+  "index-finger-phalanx-intermediate", // 7
+  "index-finger-phalanx-distal",       // 8
+  "index-finger-tip",                  // 9
+  "middle-finger-metacarpal",          // 10
+  "middle-finger-phalanx-proximal",    // 11
+  "middle-finger-phalanx-intermediate", // 12
+  "middle-finger-phalanx-distal",      // 13
+  "middle-finger-tip",                 // 14
+  "ring-finger-metacarpal",            // 15
+  "ring-finger-phalanx-proximal",      // 16
+  "ring-finger-phalanx-intermediate",  // 17
+  "ring-finger-phalanx-distal",        // 18
+  "ring-finger-tip",                   // 19
+  "pinky-finger-metacarpal",           // 20
+  "pinky-finger-phalanx-proximal",     // 21
+  "pinky-finger-phalanx-intermediate", // 22
+  "pinky-finger-phalanx-distal",       // 23
+  "pinky-finger-tip"                   // 24
+];
+
+// Updated hand tracking code
+// Process each input source (hands)
+for (const inputSource of frame.session.inputSources) {
+  if (inputSource.hand) {
+    const handedness = inputSource.handedness; // 'left' or 'right'
+    const hand = inputSource.hand;
+    
+    // Create the continuous array in the correct order with a single loop
+    const continuousArray: number[] = [];
+    
+    for (let i = 0; i < JOINT_ORDER.length; i++) {
+      const jointName = JOINT_ORDER[i];
+      const joint = hand.get(jointName as XRHandJoint);
+      
+      if (joint && frame.getJointPose) {
+        const jointPose = frame.getJointPose(joint, referenceSpace);
+        if (jointPose) {
+          // Add the 16 matrix values for this joint
+          continuousArray.push(...Array.from(jointPose.transform.matrix));
+        } else {
+          // Joint pose not available - add identity matrix (16 values)
+          continuousArray.push(
+            1, 0, 0, 0,  // Column 1
+            0, 1, 0, 0,  // Column 2
+            0, 0, 1, 0,  // Column 3
+            0, 0, 0, 1   // Column 4
+          );
+        }
+      } else {
+        // Joint not found - add identity matrix (16 values)
+        addLog(`Joint ${jointName} not found`);
+        continuousArray.push(
+          1, 0, 0, 0,  // Column 1
+          0, 1, 0, 0,  // Column 2
+          0, 0, 1, 0,  // Column 3
+          0, 0, 0, 1   // Column 4
+        );
+      }
+    }
+    
+    // Store the continuous array (should be 25 joints * 16 values = 400 total)
+    handData[handedness] = continuousArray
+    
+    // Optional: Also store individual joint data if you need it elsewhere
+    // handData.hands[handedness].joints = jointData;
+  }
+}
+
+    // Send hand tracking data if we have any hands
+    if (Object.keys(handData).length > 0) {
+      try {
+        wsRef.current!.send(JSON.stringify(handData));
+        // Log hand tracking activity (throttled)
+        // if (Math.random() < 0.01) { // Log ~1% of hand tracking sends to avoid spam
+        //   // addLog(`Sent hand tracking data for: ${Object.keys(handData.hands).join(', ')}`);
+        // }
+      } catch (error) {
+        addLog(`Failed to send hand tracking data: ${error}`);
+      }
+    }
+    // else{
+    //   addLog("Object.keys(handData.hands).length not greater than 0");
+    // }
+  };
+
+  const clearLogs = () => {
+    setLogs([]);
   };
 
   return (
@@ -304,9 +519,6 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
           >
             Start VR Experiment
           </button>
-          <p style={{ fontSize: '16px', color: '#666' }}>
-            Make sure your video files (/pi_L.mp4 and /pi_R.mp4) are accessible from your ngrok server.
-          </p>
         </div>
       )}
       
@@ -322,6 +534,57 @@ export default function StereoVR({ streamLeft, streamRight }: StereoVRProps) {
           Status: {status}
         </div>
       )}
+      
+      {/* Logs Section */}
+      <div style={{ marginBottom: '20px' }}>
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          marginBottom: '10px'
+        }}>
+          <h3 style={{ margin: 0, fontSize: '18px' }}>Debug Logs</h3>
+          <button
+            onClick={clearLogs}
+            style={{
+              padding: '5px 10px',
+              backgroundColor: '#dc3545',
+              color: 'white',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: 'pointer',
+              fontSize: '12px'
+            }}
+          >
+            Clear Logs
+          </button>
+        </div>
+        <div
+          ref={logsRef}
+          style={{
+            height: '200px',
+            overflowY: 'auto',
+            backgroundColor: '#1a1a1a',
+            color: '#00ff00',
+            fontFamily: 'Consolas, Monaco, monospace',
+            fontSize: '12px',
+            padding: '10px',
+            border: '1px solid #333',
+            borderRadius: '5px',
+            whiteSpace: 'pre-wrap'
+          }}
+        >
+          {logs.length === 0 ? (
+            <div style={{ color: '#666' }}>No logs yet...</div>
+          ) : (
+            logs.map((log, index) => (
+              <div key={index} style={{ marginBottom: '2px' }}>
+                {log}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
       
       <video
         ref={leftVideoRef}
