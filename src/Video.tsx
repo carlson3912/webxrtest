@@ -1,32 +1,35 @@
 // VideoScreenWeb.tsx
 import { useEffect, useRef, useCallback } from 'react';
-const HOST_URL = "wss://c47174bc6ce1.ngrok-free.app"
+
 const configuration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
 interface VideoProps {
-  setStreamLeft: (stream: MediaStream) => void;
-  setStreamRight: (stream: MediaStream) => void;
+  setStreams: (streams: MediaStream[]) => void;
   vector: { x: number; y: number; z: number };
   setIsConnected: (isConnected: boolean) => void;
   setLocalStream: (stream: MediaStream) => void;
   call: boolean;
+  url: string;
   signalingUrl: string;
+  activeCameras: number[];
 }
 
 export default function VideoScreenWeb({
-  setStreamLeft,
-  setStreamRight,
+  setStreams,
   vector,
   setIsConnected,
   call,
   signalingUrl,
+  url,
+  activeCameras,
 }: VideoProps) {
   const pc = useRef<RTCPeerConnection | null>(null);
   const ws = useRef<WebSocket | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const streamsAdded = useRef(0);
+  const currentStreams = useRef<MediaStream[]>([]);
 
 
   const setupPeerConnection = useCallback(
@@ -41,14 +44,10 @@ export default function VideoScreenWeb({
         const newStream = new MediaStream();
         newStream.addTrack(videoTrack);
 
-        if (streamsAdded.current === 0) {
-          console.log('adding track to left stream');
-          setStreamRight(newStream);
-          streamsAdded.current++;
-        } else {
-          console.log('adding track to right stream');
-          setStreamLeft(newStream);
-        }
+        console.log(`Adding track to stream ${streamsAdded.current}`);
+        currentStreams.current[streamsAdded.current] = newStream;
+        setStreams([...currentStreams.current]);
+        streamsAdded.current++;
       };
 
       pc.current.onicecandidate = (event) => {
@@ -75,11 +74,11 @@ export default function VideoScreenWeb({
         dataChannel.current.onclose = () => console.log('Data channel closed');
       };
     },
-    [setStreamLeft, setStreamRight]
+    [setStreams]
   );
 
   const setupWebSocket = useCallback(() => {
-    ws.current = new WebSocket(HOST_URL);
+    ws.current = new WebSocket(url);
 
     ws.current.onopen = () => {
       console.log('WebSocket connected');
@@ -94,8 +93,10 @@ export default function VideoScreenWeb({
       const message = JSON.parse(event.data);
       console.log('message', message);
       if(message.type === "robot_available"){ 
+        console.log("sending HELLO with cameras:", activeCameras);
         const message = {
           type: "HELLO",
+          cameras: activeCameras,
         };
         ws.current?.send(JSON.stringify(message));
      }
@@ -133,25 +134,29 @@ export default function VideoScreenWeb({
     pc.current?.close();
     dataChannel.current = null;
     pc.current = null;
-  }, []);
+    streamsAdded.current = 0;
+    currentStreams.current = [];
+    setStreams([]);
+  }, [setStreams]);
 
   const renegotiate = useCallback(async () => {
     cleanup();
-    await setupPeerConnection(call);
+    await setupPeerConnection();
 
     if (!ws.current) {
       setupWebSocket();
     } else if (ws.current.readyState === WebSocket.OPEN) {
-      ws.current.send('HELLO');
+      ws.current.send(JSON.stringify({ type: "HELLO", cameras: activeCameras }));
     } else {
       console.log('WebSocket not open yet, will send HELLO later');
     }
-  }, [call, cleanup, setupPeerConnection, setupWebSocket]);
+  }, [cleanup, setupPeerConnection, setupWebSocket, activeCameras]);
 
   useEffect(() => {
+    console.log('Renegotiating');
     renegotiate();
     return cleanup;
-  }, [call]);
+  }, []);
 
   useEffect(() => {
     if (dataChannel.current?.readyState === 'open') {

@@ -1,30 +1,43 @@
 import React, { useRef, useEffect, useState } from 'react';
 
 interface SideBySideVideoProps {
-  streamLeft: MediaStream | null;
-  streamRight: MediaStream | null;
+  streams: MediaStream[];
 }
 
-export default function SideBySideVideo({ streamLeft, streamRight }: SideBySideVideoProps) {
-  const leftVideoRef = useRef(null);
-  const rightVideoRef = useRef(null);
+export default function SideBySideVideo({ streams }: SideBySideVideoProps) {
+  const videoRefs = useRef<(HTMLVideoElement | null)[]>([]);
   const [status, setStatus] = useState('');
   const [videosReady, setVideosReady] = useState(false);
+  const [resolutions, setResolutions] = useState<string[]>([]);
   
   useEffect(() => {
-    // Whenever streamLeft updates, set it as srcObject for left video element
-    if (leftVideoRef.current && streamLeft) {
-      leftVideoRef.current.srcObject = streamLeft;
-      leftVideoRef.current.play().catch(console.warn);
-    }
-  }, [streamLeft]);
-
-  useEffect(() => {
-    if (rightVideoRef.current && streamRight) {
-      rightVideoRef.current.srcObject = streamRight;
-      rightVideoRef.current.play().catch(console.warn);
-    }
-  }, [streamRight]);
+    // Update video elements when streams change
+    streams.forEach((stream, index) => {
+      if (videoRefs.current[index] && stream) {
+        const video = videoRefs.current[index];
+        if (video) {
+          video.srcObject = stream;
+          
+          // Add resolution logging
+          const logResolution = () => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+              const resolution = `${video.videoWidth} x ${video.videoHeight}`;
+              console.log(`📺 Stream ${index} Resolution: ${resolution}`);
+              setResolutions(prev => {
+                const newResolutions = [...prev];
+                newResolutions[index] = resolution;
+                return newResolutions;
+              });
+              video.removeEventListener('loadedmetadata', logResolution);
+            }
+          };
+          
+          video.addEventListener('loadedmetadata', logResolution);
+          video.play().catch(console.warn);
+        }
+      }
+    });
+  }, [streams]);
 
   const updateStatus = (msg: string) => {
     console.log(msg);
@@ -34,67 +47,14 @@ export default function SideBySideVideo({ streamLeft, streamRight }: SideBySideV
   const startSideBySide = async () => {
     updateStatus('Starting side-by-side video...');
     
-    // Video elements
-    const leftVideo = leftVideoRef.current!;
-    const rightVideo = rightVideoRef.current!;
-
-    const handleVideoError = (videoEl: HTMLVideoElement, name: string) => {
-      videoEl.onerror = () => {
-        const err = videoEl.error;
-        if (!err) return;
-        updateStatus(`${name} video error: ${err.message}`);
-      };
-    };
-
-    handleVideoError(leftVideo, 'Left');
-    handleVideoError(rightVideo, 'Right');
-
-    // Set video properties for better loading
-    leftVideo.muted = true;
-    rightVideo.muted = true;
-    leftVideo.playsInline = true;
-    rightVideo.playsInline = true;
-    leftVideo.preload = 'metadata';
-    rightVideo.preload = 'metadata';
-
-    // Wait for videos to load
-    updateStatus('Loading videos...');
-    
-    const waitForVideo = (video: HTMLVideoElement): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        if (video.readyState >= 2) {
-          resolve();
-          return;
-        }
-        
-        const onLoadedData = () => {
-          video.removeEventListener('loadeddata', onLoadedData);
-          video.removeEventListener('error', onError);
-          resolve();
-        };
-        
-        const onError = () => {
-          video.removeEventListener('loadeddata', onLoadedData);
-          video.removeEventListener('error', onError);
-          reject(new Error(`Video failed to load: ${video.src}`));
-        };
-        
-        video.addEventListener('loadeddata', onLoadedData);
-        video.addEventListener('error', onError);
-        video.load();
-      });
-    };
+    if (streams.length === 0) {
+      updateStatus('No streams available');
+      return;
+    }
 
     try {
-      await Promise.all([
-        waitForVideo(leftVideo),
-        waitForVideo(rightVideo)
-      ]);
       updateStatus('Videos loaded, starting playback...');
-      
-      await leftVideo.play();
-      await rightVideo.play();
-      updateStatus('Videos playing in side-by-side mode');
+      updateStatus(`Videos playing in side-by-side mode - ${streams.length} stream(s)`);
       setVideosReady(true);
     } catch (err) {
       updateStatus(`Video error: ${err}`);
@@ -125,41 +85,53 @@ export default function SideBySideVideo({ streamLeft, streamRight }: SideBySideV
         justifyContent: 'center',
         flexWrap: 'wrap'
       }}>
-        <div style={{ textAlign: 'center' }}>
-          <h3 style={{ margin: '0 0 10px 0', color: '#333' }}>Left Camera</h3>
-          <video
-            ref={leftVideoRef}
-            crossOrigin="anonymous"
-            style={{ 
-              width: '400px',
-              height: '300px',
-              border: '2px solid #007bff',
-              borderRadius: '8px',
-              backgroundColor: '#000'
-            }}
-            muted
-            playsInline
-            controls
-          />
-        </div>
+        {streams.map((stream, index) => {
+          const colors = ['#007bff', '#28a745', '#dc3545', '#ffc107', '#6f42c1'];
+          return (
+            <div key={index} style={{ textAlign: 'center' }}>
+              <h3 style={{ margin: '0 0 5px 0', color: '#333' }}>Camera {index}</h3>
+              {resolutions[index] && (
+                <div style={{ 
+                  fontSize: '12px', 
+                  color: '#666', 
+                  marginBottom: '5px',
+                  fontWeight: 'bold'
+                }}>
+                  📺 {resolutions[index]}
+                </div>
+              )}
+              <video
+                ref={(el) => {
+                  if (videoRefs.current) {
+                    videoRefs.current[index] = el;
+                  }
+                }}
+                crossOrigin="anonymous"
+                style={{ 
+                  width: '400px',
+                  height: '300px',
+                  border: `2px solid ${colors[index % colors.length]}`,
+                  borderRadius: '8px',
+                  backgroundColor: '#000'
+                }}
+                muted
+                playsInline
+                controls
+              />
+            </div>
+          );
+        })}
         
-        <div style={{ textAlign: 'center' }}>
-          <h3 style={{ margin: '0 0 10px 0', color: '#333' }}>Right Camera</h3>
-          <video
-            ref={rightVideoRef}
-            crossOrigin="anonymous"
-            style={{ 
-              width: '400px',
-              height: '300px',
-              border: '2px solid #28a745',
-              borderRadius: '8px',
-              backgroundColor: '#000'
-            }}
-            muted
-            playsInline
-            controls
-          />
-        </div>
+        {streams.length === 0 && (
+          <div style={{ 
+            textAlign: 'center', 
+            color: '#666', 
+            fontSize: '18px',
+            padding: '40px'
+          }}>
+            No camera streams available. Select cameras and connect.
+          </div>
+        )}
       </div>
     </div>
   );
